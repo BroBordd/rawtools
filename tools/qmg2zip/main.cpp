@@ -2,7 +2,6 @@
 #include "bootanim_zip.h"
 #include "desc.h"
 
-#include "qmgc/encode.h"
 #include "qmgc/types.h"
 
 // qmgd/include/qmgd/decode.h is missing extern "C" guards, so its C
@@ -21,9 +20,7 @@ extern "C" {
 namespace {
 
 void print_usage() {
-    std::fprintf(stderr,
-        "usage: bootanim_qmg encode bootanimation.zip out.qmg [--delay N]\n"
-        "       bootanim_qmg decode in.qmg bootanimation.zip [--fps N]\n");
+    std::fprintf(stderr, "usage: qmg2zip in.qmg bootanimation.zip [--fps N]\n");
 }
 
 std::vector<uint8_t> read_whole_file(const std::string& path) {
@@ -39,54 +36,6 @@ std::vector<uint8_t> read_whole_file(const std::string& path) {
     }
     std::fclose(f);
     return buf;
-}
-
-int run_encode(const std::string& zip_path, const std::string& qmg_path, int delay_override) {
-    bootanim::LoadedBootanim loaded = bootanim::load_bootanim_zip(zip_path);
-
-    if (loaded.frames.empty()) {
-        std::fprintf(stderr, "error: bootanimation contains no frames\n");
-        return 1;
-    }
-    if (loaded.had_multiple_parts) {
-        std::fprintf(stderr,
-            "warning: desc.txt has multiple parts; flattening into one "
-            "linear qmg animation (per-part loop/pause/color settings "
-            "are dropped -- see tools/bootanim_qmg/README.md)\n");
-    }
-    if (loaded.had_infinite_loop) {
-        std::fprintf(stderr,
-            "warning: a part used loop_count 0 (infinite); qmg animations "
-            "have no direct 'infinite within a part' concept for a "
-            "flattened multi-part sequence, so it was played once\n");
-    }
-
-    int delay_cs = delay_override > 0 ? delay_override
-                                       : (loaded.desc.fps > 0 ? 100 / loaded.desc.fps : 10);
-
-    std::vector<uint8_t> qmg_data;
-    try {
-        if (loaded.frames.size() == 1) {
-            qmg_data = qmgc::encode_still(loaded.frames[0]);
-        } else {
-            qmg_data = qmgc::encode_animation(loaded.frames, delay_cs);
-        }
-    } catch (const std::exception& e) {
-        std::fprintf(stderr, "encode error: %s\n", e.what());
-        return 1;
-    }
-
-    FILE* out = std::fopen(qmg_path.c_str(), "wb");
-    if (!out) {
-        std::fprintf(stderr, "error: cannot write %s\n", qmg_path.c_str());
-        return 1;
-    }
-    std::fwrite(qmg_data.data(), 1, qmg_data.size(), out);
-    std::fclose(out);
-
-    std::fprintf(stderr, "encoded %zu frame(s) -> %s (%zu bytes)\n",
-                 loaded.frames.size(), qmg_path.c_str(), qmg_data.size());
-    return 0;
 }
 
 int run_decode(const std::string& qmg_path, const std::string& zip_path, int fps_override) {
@@ -177,21 +126,17 @@ int run_decode(const std::string& qmg_path, const std::string& zip_path, int fps
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc < 4) {
+    if (argc < 3) {
         print_usage();
         return 1;
     }
 
-    std::string mode = argv[1];
-    std::string in_path = argv[2];
-    std::string out_path = argv[3];
+    std::string qmg_path = argv[1];
+    std::string zip_path = argv[2];
 
-    int delay = 0;
     int fps = 0;
-    for (int i = 4; i < argc; ++i) {
-        if (std::strcmp(argv[i], "--delay") == 0 && i + 1 < argc) {
-            delay = std::atoi(argv[++i]);
-        } else if (std::strcmp(argv[i], "--fps") == 0 && i + 1 < argc) {
+    for (int i = 3; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--fps") == 0 && i + 1 < argc) {
             fps = std::atoi(argv[++i]);
         } else {
             std::fprintf(stderr, "unknown argument: %s\n", argv[i]);
@@ -201,16 +146,9 @@ int main(int argc, char** argv) {
     }
 
     try {
-        if (mode == "encode") {
-            return run_encode(in_path, out_path, delay);
-        } else if (mode == "decode") {
-            return run_decode(in_path, out_path, fps);
-        }
+        return run_decode(qmg_path, zip_path, fps);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());
         return 1;
     }
-
-    print_usage();
-    return 1;
 }

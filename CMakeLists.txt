@@ -8,4 +8,6 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 add_subdirectory(third_party/qmgc)
 add_subdirectory(third_party/qmgd)
-add_subdirectory(tools/bootanim_qmg)
+add_subdirectory(tools/common)
+add_subdirectory(tools/zip2qmg)
+add_subdirectory(tools/qmg2zip)

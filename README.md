@@ -1,6 +1,6 @@
 # rawtools
 
-Low-level Android tooling. First tool in here: converting between Android
+Low-level Android tooling. First tools in here: converting between Android
 `bootanimation.zip` archives and Samsung Qmage (`.qmg`) boot-animation files,
 built on top of [qmgc](https://github.com/BroBordd/qmgc) (encoder) and
 [qmgd](https://github.com/BroBordd/qmgd) (decoder).
@@ -8,9 +8,11 @@ built on top of [qmgc](https://github.com/BroBordd/qmgc) (encoder) and
 ## Layout
 
 ```
-third_party/qmgc/   qmgc encoder library + CLI (git submodule)
-third_party/qmgd/   qmgd decoder library + CLI (git submodule)
-tools/bootanim_qmg/ bootanimation.zip <-> .qmg converter (this repo's tool)
+third_party/qmgc/  qmgc encoder library + CLI (git submodule)
+third_party/qmgd/  qmgd decoder library + CLI (git submodule)
+tools/common/      shared desc.txt + bootanimation.zip handling (both tools)
+tools/zip2qmg/     bootanimation.zip -> .qmg (encode)
+tools/qmg2zip/     .qmg -> bootanimation.zip (decode)
 ```
 
 ## Getting the code
@@ -21,18 +23,19 @@ git clone --recurse-submodules https://github.com/BroBordd/rawtools
 git submodule update --init --recursive
 ```
 
-## bootanim_qmg
+## zip2qmg / qmg2zip
 
-Converts a stock Android `bootanimation.zip` into a single `.qmg` file
+Convert a stock Android `bootanimation.zip` into a single `.qmg` file
 (Samsung's on-device boot animation format), and back.
 
 ```sh
-bootanim_qmg encode bootanimation.zip out.qmg
-bootanim_qmg decode in.qmg bootanimation.zip
+zip2qmg bootanimation.zip out.qmg
+qmg2zip in.qmg bootanimation.zip
 ```
 
-See [`tools/bootanim_qmg/README.md`](tools/bootanim_qmg/README.md) for
-details, current status, and format-mapping notes (desc.txt <-> qmg header
+See [`tools/zip2qmg/README.md`](tools/zip2qmg/README.md) and
+[`tools/qmg2zip/README.md`](tools/qmg2zip/README.md) for details,
+current status, and format-mapping notes (desc.txt <-> qmg header
 fields).
 
 ## License
