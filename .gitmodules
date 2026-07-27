@@ -1,0 +1,6 @@
+[submodule "third_party/qmgc"]
+	path = third_party/qmgc
+	url = https://github.com/BroBordd/qmgc
+[submodule "third_party/qmgd"]
+	path = third_party/qmgd
+	url = https://github.com/BroBordd/qmgd

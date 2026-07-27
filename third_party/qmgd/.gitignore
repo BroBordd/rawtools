@@ -1,0 +1,10 @@
+build/
+*.o
+*.a
+*.so
+qmgd_dump
+*.ppm
+*.exe
+.vscode/
+.idea/
+*.DS_Store
