@@ -21,9 +21,7 @@ bootanim_qmg decode in.qmg bootanimation.zip [--fps N]
 ## Format notes: desc.txt <-> qmg
 
 `bootanimation.zip`'s `desc.txt` supports multiple parts (`p`/`c` lines,
-loop counts, pauses, per-part background colors) — see
-[`../../third_party/qmgd/docs/FORMAT.md`](../../third_party/qmgd/docs/FORMAT.md)
-and the upstream
+loop counts, pauses, per-part background colors) — see the upstream
 [bootanimation FORMAT.md](https://android.googlesource.com/platform/frameworks/base/+/master/cmds/bootanimation/FORMAT.md)
 for the full spec.
 
@@ -45,6 +43,7 @@ sequence.
 
 ## Status
 
-Scaffolding only — CLI arg parsing, zip I/O, PNG writing on the decode
-side, and the desc.txt reader/writer still need implementing. See inline
-`TODO`s in `main.cpp`.
+Working — both directions implemented and round-trip tested against
+qmgd's sample files. Known gaps: multi-part/looping desc.txt is
+flattened (lossy) on encode, and transparency frames aren't supported
+yet (matches qmgd's current decode limitations).
