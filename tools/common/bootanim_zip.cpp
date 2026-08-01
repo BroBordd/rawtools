@@ -13,18 +13,25 @@
 #include <memory>
 #include <stdexcept>
 #include <unistd.h>
+#include <vector>
 
 namespace bootanim {
 
 namespace {
 
-// RAII temp directory under /tmp, removed recursively on destruction.
+// RAII temp directory under $TMPDIR (falls back to /tmp), removed
+// recursively on destruction. Not hardcoded to /tmp because that path
+// doesn't exist on some platforms (e.g. Termux on Android).
 struct TempDir {
     std::string path;
     TempDir() {
-        char tmpl[] = "/tmp/bootanim_qmg_XXXXXX";
-        char* d = mkdtemp(tmpl);
-        if (!d) throw std::runtime_error("mkdtemp failed");
+        const char* base = std::getenv("TMPDIR");
+        if (!base || !*base) base = "/tmp";
+        std::string tmpl = std::string(base) + "/bootanim_qmg_XXXXXX";
+        std::vector<char> buf(tmpl.begin(), tmpl.end());
+        buf.push_back('\0');
+        char* d = mkdtemp(buf.data());
+        if (!d) throw std::runtime_error("mkdtemp failed under " + std::string(base));
         path = d;
     }
     ~TempDir() {
