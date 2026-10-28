@@ -219,42 +219,49 @@ void add_stored_file(zip_t* archive, const std::string& entry_name, const std::s
 
 } // namespace
 
-LoadedBootanim load_bootanim_zip(const std::string& zip_path) {
-    TempDir tmp;
-    extract_zip(zip_path, tmp.path);
+BootanimSource open_bootanim_zip(const std::string& zip_path) {
+    auto tmp = std::make_shared<TempDir>();
+    extract_zip(zip_path, tmp->path);
 
-    std::string desc_path = tmp.path + "/desc.txt";
-    Desc desc = parse_desc(read_file_text(desc_path));
+    BootanimSource src;
+    src.desc = parse_desc(read_file_text(tmp->path + "/desc.txt"));
+    src.had_multiple_parts = src.desc.parts.size() > 1;
 
-    LoadedBootanim result;
-    result.desc = desc;
-    result.had_multiple_parts = desc.parts.size() > 1;
-
-    for (const auto& part : desc.parts) {
-        std::string part_dir = tmp.path + "/" + part.path;
+    for (const auto& part : src.desc.parts) {
+        std::string part_dir = tmp->path + "/" + part.path;
         std::vector<std::string> files = list_frame_files(part_dir);
         if (files.empty()) {
             throw std::runtime_error("part '" + part.path + "' has no PNG/JPEG frames");
         }
-
-        std::vector<qmgc::Image> part_frames;
-        part_frames.reserve(files.size());
-        for (const auto& fname : files) {
-            part_frames.push_back(qmgc::load_image(part_dir + "/" + fname));
-        }
-
         int repeats = part.loop_count;
         if (repeats == 0) {
-            result.had_infinite_loop = true;
+            src.had_infinite_loop = true;
             repeats = 1; // lossy: flatten "infinite" to a single pass
         }
+        src.frame_paths.reserve(src.frame_paths.size() + files.size() * static_cast<size_t>(repeats));
         for (int r = 0; r < repeats; ++r) {
-            for (const auto& img : part_frames) {
-                result.frames.push_back(img);
-            }
+            for (const auto& fname : files) src.frame_paths.push_back(part_dir + "/" + fname);
         }
     }
+    src.tmp_guard = tmp;
+    return src;
+}
 
+qmgc::Image BootanimSource::load_frame(size_t index) const {
+    if (index >= frame_paths.size()) throw std::runtime_error("frame index out of range");
+    return qmgc::load_image(frame_paths[index]);
+}
+
+LoadedBootanim load_bootanim_zip(const std::string& zip_path) {
+    // Eager convenience wrapper; holds every frame in RAM. Prefer
+    // open_bootanim_zip() for anything that can process frames one at a time.
+    BootanimSource src = open_bootanim_zip(zip_path);
+    LoadedBootanim result;
+    result.desc = src.desc;
+    result.had_infinite_loop = src.had_infinite_loop;
+    result.had_multiple_parts = src.had_multiple_parts;
+    result.frames.reserve(src.frame_count());
+    for (size_t i = 0; i < src.frame_count(); ++i) result.frames.push_back(src.load_frame(i));
     return result;
 }
 

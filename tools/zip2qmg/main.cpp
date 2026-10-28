@@ -11,8 +11,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <stdexcept>
 #include <string>
 #include <vector>
+#include <unistd.h>
 
 namespace {
 
@@ -96,57 +98,53 @@ qmgc::Image scale_image_pad(const qmgc::Image& src, int tw, int th,
 int run_encode(const std::string& zip_path, const std::string& qmg_path,
                int delay_override, int fps_override, int target_w, int target_h,
                bool pad_fit, uint8_t pad_r, uint8_t pad_g, uint8_t pad_b) {
-    bootanim::LoadedBootanim loaded = bootanim::load_bootanim_zip(zip_path);
+    // Frames are NOT decoded up front: we only collect their paths and then
+    // decode/scale/encode/write them a few at a time, so peak memory stays
+    // roughly constant regardless of animation length.
+    bootanim::BootanimSource src = bootanim::open_bootanim_zip(zip_path);
 
-    if (loaded.frames.empty()) {
+    if (src.frame_count() == 0) {
         std::fprintf(stderr, "error: bootanimation contains no frames\n");
         return 1;
     }
-    if (loaded.had_multiple_parts) {
+    if (src.had_multiple_parts) {
         std::fprintf(stderr,
             "warning: desc.txt has multiple parts; flattening into one "
             "linear qmg animation (per-part loop/pause/color settings "
             "are dropped -- see tools/zip2qmg/README.md)\n");
     }
-    if (loaded.had_infinite_loop) {
+    if (src.had_infinite_loop) {
         std::fprintf(stderr,
             "warning: a part used loop_count 0 (infinite); qmg animations "
             "have no direct 'infinite within a part' concept for a "
             "flattened multi-part sequence, so it was played once\n");
     }
 
-    if (target_w > 0 && target_h > 0) {
-        for (auto& img : loaded.frames) {
-            if (img.width != target_w || img.height != target_h) {
-                img = pad_fit ? scale_image_pad(img, target_w, target_h, pad_r, pad_g, pad_b)
-                              : qmgc::scale_image(img, target_w, target_h);
-            }
-        }
+    const bool resize = target_w > 0 && target_h > 0;
+    if (resize) {
         std::fprintf(stderr, "%s frames to %dx%d for qmg output\n",
                      pad_fit ? "fitting (padded)" : "stretching", target_w, target_h);
     }
+
+    // Decode (and optionally resize) a single frame on demand.
+    auto get_frame = [&](int i) -> qmgc::Image {
+        qmgc::Image img = src.load_frame(static_cast<size_t>(i));
+        if (resize && (img.width != target_w || img.height != target_h)) {
+            img = pad_fit ? scale_image_pad(img, target_w, target_h, pad_r, pad_g, pad_b)
+                          : qmgc::scale_image(img, target_w, target_h);
+        }
+        return img;
+    };
 
     int delay_cs;
     if (delay_override > 0) {
         delay_cs = delay_override;
     } else if (fps_override > 0) {
         delay_cs = 100 / fps_override;
-    } else if (loaded.desc.fps > 0) {
-        delay_cs = 100 / loaded.desc.fps;
+    } else if (src.desc.fps > 0) {
+        delay_cs = 100 / src.desc.fps;
     } else {
         delay_cs = 10;
-    }
-
-    std::vector<uint8_t> qmg_data;
-    try {
-        if (loaded.frames.size() == 1) {
-            qmg_data = qmgc::encode_still(loaded.frames[0]);
-        } else {
-            qmg_data = qmgc::encode_animation(loaded.frames, delay_cs);
-        }
-    } catch (const std::exception& e) {
-        std::fprintf(stderr, "encode error: %s\n", e.what());
-        return 1;
     }
 
     FILE* out = std::fopen(qmg_path.c_str(), "wb");
@@ -154,11 +152,54 @@ int run_encode(const std::string& zip_path, const std::string& qmg_path,
         std::fprintf(stderr, "error: cannot write %s\n", qmg_path.c_str());
         return 1;
     }
-    std::fwrite(qmg_data.data(), 1, qmg_data.size(), out);
-    std::fclose(out);
+    size_t bytes_written = 0;
+    bool io_error = false;
+
+    qmgc::StreamSink sink;
+    sink.write = [&](const uint8_t* data, size_t n) {
+        if (std::fwrite(data, 1, n, out) != n) {
+            io_error = true;
+            throw std::runtime_error("write to " + qmg_path + " failed (disk full?)");
+        }
+        bytes_written += n;
+    };
+    // Used by the automatic 0x0f -> 0x0b fallback: throw away what we wrote
+    // and start the file over.
+    sink.reset = [&]() {
+        std::fflush(out);
+        std::rewind(out);
+        if (ftruncate(fileno(out), 0) != 0) {
+            io_error = true;
+            throw std::runtime_error("cannot truncate " + qmg_path);
+        }
+        bytes_written = 0;
+    };
+
+    bool ok = false;
+    try {
+        if (src.frame_count() == 1) {
+            std::vector<uint8_t> still = qmgc::encode_still(get_frame(0));
+            sink.write(still.data(), still.size());
+        } else {
+            qmgc::encode_animation_stream(static_cast<int>(src.frame_count()), get_frame,
+                                          delay_cs, sink);
+        }
+        ok = true;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "%s: %s\n", io_error ? "error" : "encode error", e.what());
+    }
+
+    if (std::fclose(out) != 0 && ok) {
+        std::fprintf(stderr, "error: failed to finalize %s\n", qmg_path.c_str());
+        ok = false;
+    }
+    if (!ok) {
+        std::remove(qmg_path.c_str()); // don't leave a truncated .qmg behind
+        return 1;
+    }
 
     std::fprintf(stderr, "encoded %zu frame(s) -> %s (%zu bytes)\n",
-                 loaded.frames.size(), qmg_path.c_str(), qmg_data.size());
+                 src.frame_count(), qmg_path.c_str(), bytes_written);
     return 0;
 }
 

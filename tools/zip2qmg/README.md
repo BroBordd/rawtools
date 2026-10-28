@@ -62,3 +62,12 @@ discovered later.
 
 Working, round-trip tested against qmgd's sample files via `qmg2zip`.
 Known gap: multi-part/looping `desc.txt` is flattened (lossy).
+
+## Memory use
+
+zip2qmg streams: the archive is extracted to `$TMPDIR` (disk), and frames are
+then decoded, resized, encoded and written to the output a handful at a time
+(about one per CPU thread, capped at 8). Peak RAM is therefore roughly
+constant (tens of MB for 1080x2400 input) instead of scaling with frame count,
+and `loop_count` repeats no longer duplicate pixel data. Output is
+byte-identical to the previous all-in-memory implementation.
