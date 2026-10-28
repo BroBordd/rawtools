@@ -26,3 +26,10 @@ lossy encode-direction mapping.
 Working, round-trip tested against qmgd's sample files via `zip2qmg`.
 Known gap: transparency frames aren't supported yet (matches qmgd's
 current decode limitations).
+
+## Memory use
+
+qmg2zip memory-maps the input and decodes one frame at a time, writing each
+frame straight to a PNG in `$TMPDIR`; only the current and reference frames are
+held in RAM, so peak memory does not grow with frame count. Temp disk space
+must hold the decoded PNGs until the zip is assembled.

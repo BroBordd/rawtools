@@ -265,20 +265,31 @@ LoadedBootanim load_bootanim_zip(const std::string& zip_path) {
     return result;
 }
 
-void write_bootanim_zip(const std::string& zip_path, int width, int height,
-                         int fps, bool infinite_loop,
-                         const std::vector<Rgb565Frame>& frames) {
+struct BootanimWriter::Impl {
     TempDir tmp;
-    std::string part_dir = tmp.path + "/part0";
-    mkdir_p(part_dir);
+    std::string part_dir;
+    size_t count = 0;
+};
 
-    for (size_t i = 0; i < frames.size(); ++i) {
-        const Rgb565Frame& f = frames[i];
-        std::vector<uint8_t> rgb8 = rgb565_to_rgb8(f.rgb565.data(), f.width, f.height);
-        char name[64];
-        std::snprintf(name, sizeof(name), "%04zu.png", i);
-        write_png(part_dir + "/" + name, rgb8.data(), f.width, f.height);
-    }
+BootanimWriter::BootanimWriter() : impl_(new Impl) {
+    impl_->part_dir = impl_->tmp.path + "/part0";
+    mkdir_p(impl_->part_dir);
+}
+BootanimWriter::~BootanimWriter() = default;
+
+size_t BootanimWriter::frame_count() const { return impl_->count; }
+
+void BootanimWriter::add_frame(const uint8_t* rgb565, int width, int height) {
+    std::vector<uint8_t> rgb8 = rgb565_to_rgb8(rgb565, width, height);
+    char name[64];
+    std::snprintf(name, sizeof(name), "%04zu.png", impl_->count);
+    write_png(impl_->part_dir + "/" + name, rgb8.data(), width, height);
+    ++impl_->count;
+}
+
+void BootanimWriter::finish(const std::string& zip_path, int width, int height,
+                             int fps, bool infinite_loop) {
+    const std::string& root = impl_->tmp.path;
 
     Desc desc;
     desc.width = width;
@@ -291,7 +302,7 @@ void write_bootanim_zip(const std::string& zip_path, int width, int height,
     part.path = "part0";
     desc.parts.push_back(part);
 
-    std::string desc_path = tmp.path + "/desc.txt";
+    std::string desc_path = root + "/desc.txt";
     FILE* df = std::fopen(desc_path.c_str(), "wb");
     if (!df) throw std::runtime_error("cannot write " + desc_path);
     std::string desc_text = write_desc(desc);
@@ -312,16 +323,32 @@ void write_bootanim_zip(const std::string& zip_path, int width, int height,
         throw std::runtime_error("failed to create zip " + zip_path + ": " + msg);
     }
 
-    add_stored_file(archive, "desc.txt", desc_path);
-    for (size_t i = 0; i < frames.size(); ++i) {
-        char name[64];
-        std::snprintf(name, sizeof(name), "%04zu.png", i);
-        add_stored_file(archive, std::string("part0/") + name, part_dir + "/" + name);
+    try {
+        add_stored_file(archive, "desc.txt", desc_path);
+        for (size_t i = 0; i < impl_->count; ++i) {
+            char name[64];
+            std::snprintf(name, sizeof(name), "%04zu.png", i);
+            add_stored_file(archive, std::string("part0/") + name, impl_->part_dir + "/" + name);
+        }
+    } catch (...) {
+        zip_discard(archive);
+        throw;
     }
 
+    // zip_close reads the source files lazily (one at a time) and writes
+    // the archive; the temp dir must outlive it, which it does (member).
     if (zip_close(archive) < 0) {
+        std::remove(zip_path.c_str());
         throw std::runtime_error("failed to finalize zip " + zip_path);
     }
+}
+
+void write_bootanim_zip(const std::string& zip_path, int width, int height,
+                         int fps, bool infinite_loop,
+                         const std::vector<Rgb565Frame>& frames) {
+    BootanimWriter w;
+    for (const auto& f : frames) w.add_frame(f.rgb565.data(), f.width, f.height);
+    w.finish(zip_path, width, height, fps, infinite_loop);
 }
 
 } // namespace bootanim

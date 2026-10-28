@@ -52,6 +52,26 @@ struct Rgb565Frame {
     int delay_centiseconds = 0;
 };
 
+// Incremental bootanimation.zip writer for bounded-memory decoding. Each
+// frame passed to add_frame() is converted and written to a PNG in a temp
+// dir right away (disk, not RAM); finish() then builds the zip from those
+// files. Same output layout as write_bootanim_zip.
+class BootanimWriter {
+public:
+    BootanimWriter();
+    ~BootanimWriter();
+    BootanimWriter(const BootanimWriter&) = delete;
+    BootanimWriter& operator=(const BootanimWriter&) = delete;
+
+    void add_frame(const uint8_t* rgb565, int width, int height);
+    size_t frame_count() const;
+    void finish(const std::string& zip_path, int width, int height, int fps, bool infinite_loop);
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
 // Writes `frames` out as a single-part bootanimation.zip (part0/, PNGs
 // numbered 0000.png, 0001.png, ...) plus a generated desc.txt, stored
 // uncompressed as required by the Android bootanimation loader.

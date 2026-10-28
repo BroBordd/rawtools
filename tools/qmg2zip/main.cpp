@@ -14,8 +14,15 @@ extern "C" {
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
+
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace {
 
@@ -23,103 +30,123 @@ void print_usage() {
     std::fprintf(stderr, "usage: qmg2zip in.qmg bootanimation.zip [--fps N]\n");
 }
 
-std::vector<uint8_t> read_whole_file(const std::string& path) {
-    FILE* f = std::fopen(path.c_str(), "rb");
-    if (!f) throw std::runtime_error("cannot open " + path);
-    std::fseek(f, 0, SEEK_END);
-    long size = std::ftell(f);
-    std::fseek(f, 0, SEEK_SET);
-    std::vector<uint8_t> buf(static_cast<size_t>(size));
-    if (size > 0 && std::fread(buf.data(), 1, static_cast<size_t>(size), f) != static_cast<size_t>(size)) {
-        std::fclose(f);
-        throw std::runtime_error("short read on " + path);
+// Read-only memory-mapped view of the input file. Pages are loaded on demand
+// and are clean file-backed pages the kernel can drop under pressure, unlike
+// a heap copy of the whole file.
+class MappedFile {
+public:
+    explicit MappedFile(const std::string& path) {
+        int fd = ::open(path.c_str(), O_RDONLY);
+        if (fd < 0) throw std::runtime_error("cannot open " + path);
+        struct stat st;
+        if (fstat(fd, &st) != 0) {
+            ::close(fd);
+            throw std::runtime_error("cannot stat " + path);
+        }
+        size_ = static_cast<size_t>(st.st_size);
+        if (size_ > 0) {
+            void* p = mmap(nullptr, size_, PROT_READ, MAP_PRIVATE, fd, 0);
+            if (p == MAP_FAILED) {
+                ::close(fd);
+                throw std::runtime_error("cannot map " + path);
+            }
+            data_ = static_cast<const uint8_t*>(p);
+        }
+        ::close(fd);
     }
-    std::fclose(f);
-    return buf;
-}
+    ~MappedFile() {
+        if (data_) munmap(const_cast<uint8_t*>(data_), size_);
+    }
+    MappedFile(const MappedFile&) = delete;
+    MappedFile& operator=(const MappedFile&) = delete;
+    const uint8_t* data() const { return data_; }
+    size_t size() const { return size_; }
+
+private:
+    const uint8_t* data_ = nullptr;
+    size_t size_ = 0;
+};
 
 int run_decode(const std::string& qmg_path, const std::string& zip_path, int fps_override) {
-    std::vector<uint8_t> data;
+    std::unique_ptr<MappedFile> file;
     try {
-        data = read_whole_file(qmg_path);
+        file.reset(new MappedFile(qmg_path));
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());
         return 1;
     }
+    const uint8_t* data = file->data();
+    const size_t data_size = file->size();
 
-    std::vector<bootanim::Rgb565Frame> frames;
-    std::vector<uint8_t> ref;
+    // Memory is bounded to two frame buffers (current + reference): each
+    // decoded frame is written straight to a PNG on disk and not kept.
+    bootanim::BootanimWriter writer;
+    std::vector<uint8_t> dst, ref;
     int ref_linesize = 0;
     size_t pos = 0;
     int width = 0, height = 0;
     bool no_repeat = false;
     int last_delay_cs = 10;
 
-    while (pos < data.size()) {
-        QmageHeader h;
-        if (qmage_parse_header(data.data() + pos, data.size() - pos, &h) < 0) {
-            std::fprintf(stderr, "error: header parse failed at offset %zu\n", pos);
-            return 1;
-        }
-
-        uint32_t reclen;
-        if (h.mode) {
-            if (h.transparency) {
-                std::fprintf(stderr, "error: transparency frames not supported yet\n");
-                return 1;
-            }
-            if (h.alpha_position <= h.header_size) {
-                std::fprintf(stderr, "error: invalid alpha_position (%d <= header_size %d)\n",
-                              h.alpha_position, h.header_size);
-                return 1;
-            }
-            reclen = static_cast<uint32_t>(h.alpha_position);
-        } else {
-            reclen = static_cast<uint32_t>(data.size() - pos);
-        }
-
-        std::vector<uint8_t> dst(static_cast<size_t>(h.width) * h.height * 2);
-        int ret = qmage_decode_frame(data.data() + pos, reclen, &h, dst.data(),
-                                      ref.empty() ? nullptr : ref.data(), ref_linesize);
-        if (ret < 0) {
-            std::fprintf(stderr, "error: decode failed at frame %zu (encoder_mode=%d depth=%d)\n",
-                         frames.size(), h.encoder_mode, h.depth);
-            return 1;
-        }
-
-        width = h.width;
-        height = h.height;
-        no_repeat = h.animation_no_repeat != 0;
-        last_delay_cs = h.animation_delay_time > 0 ? h.animation_delay_time : last_delay_cs;
-
-        bootanim::Rgb565Frame frame;
-        frame.width = h.width;
-        frame.height = h.height;
-        frame.rgb565 = dst;
-        frame.delay_centiseconds = h.animation_delay_time;
-        frames.push_back(std::move(frame));
-
-        ref = dst;
-        ref_linesize = h.width * 2;
-        pos += reclen;
-    }
-
-    if (frames.empty()) {
-        std::fprintf(stderr, "error: no frames decoded from %s\n", qmg_path.c_str());
-        return 1;
-    }
-
-    int fps = fps_override > 0 ? fps_override
-                                : (last_delay_cs > 0 ? 100 / last_delay_cs : 10);
-
     try {
-        bootanim::write_bootanim_zip(zip_path, width, height, fps, !no_repeat, frames);
+        while (pos < data_size) {
+            QmageHeader h;
+            if (qmage_parse_header(data + pos, data_size - pos, &h) < 0) {
+                std::fprintf(stderr, "error: header parse failed at offset %zu\n", pos);
+                return 1;
+            }
+
+            uint32_t reclen;
+            if (h.mode) {
+                if (h.transparency) {
+                    std::fprintf(stderr, "error: transparency frames not supported yet\n");
+                    return 1;
+                }
+                if (h.alpha_position <= h.header_size) {
+                    std::fprintf(stderr, "error: invalid alpha_position (%d <= header_size %d)\n",
+                                  h.alpha_position, h.header_size);
+                    return 1;
+                }
+                reclen = static_cast<uint32_t>(h.alpha_position);
+            } else {
+                reclen = static_cast<uint32_t>(data_size - pos);
+            }
+
+            dst.assign(static_cast<size_t>(h.width) * h.height * 2, 0);
+            int ret = qmage_decode_frame(data + pos, reclen, &h, dst.data(),
+                                          ref.empty() ? nullptr : ref.data(), ref_linesize);
+            if (ret < 0) {
+                std::fprintf(stderr, "error: decode failed at frame %zu (encoder_mode=%d depth=%d)\n",
+                             writer.frame_count(), h.encoder_mode, h.depth);
+                return 1;
+            }
+
+            width = h.width;
+            height = h.height;
+            no_repeat = h.animation_no_repeat != 0;
+            last_delay_cs = h.animation_delay_time > 0 ? h.animation_delay_time : last_delay_cs;
+
+            writer.add_frame(dst.data(), h.width, h.height);
+
+            ref.swap(dst); // current frame becomes the next reference
+            ref_linesize = h.width * 2;
+            pos += reclen;
+        }
+
+        if (writer.frame_count() == 0) {
+            std::fprintf(stderr, "error: no frames decoded from %s\n", qmg_path.c_str());
+            return 1;
+        }
+
+        int fps = fps_override > 0 ? fps_override
+                                    : (last_delay_cs > 0 ? 100 / last_delay_cs : 10);
+        writer.finish(zip_path, width, height, fps, !no_repeat);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());
         return 1;
     }
 
-    std::fprintf(stderr, "decoded %zu frame(s) -> %s\n", frames.size(), zip_path.c_str());
+    std::fprintf(stderr, "decoded %zu frame(s) -> %s\n", writer.frame_count(), zip_path.c_str());
     return 0;
 }
 
